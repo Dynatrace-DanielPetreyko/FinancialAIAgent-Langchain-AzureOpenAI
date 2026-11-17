@@ -28,10 +28,9 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.messages.ai import AIMessageChunk, AIMessage
 from langchain_core.messages.tool import ToolMessage
 from dotenv import load_dotenv
-from traceloop.sdk import Traceloop
-# from langfuse import Langfuse
-# from langfuse.langchain import CallbackHandler
-from opentelemetry.instrumentation.requests import RequestsInstrumentor
+from opentelemetry.trace import Status, StatusCode
+from openinference.instrumentation import using_attributes
+from core.observability import init_observability, get_tracer
 
 # Initialize logging
 logger = setup_logging()
@@ -40,17 +39,19 @@ load_dotenv()
 
 @st.cache_resource
 def _init_instrumentation():
-    RequestsInstrumentor().instrument()
-    if os.environ.get("DYNATRACE_API_TOKEN"):
-        os.environ.setdefault("OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE", "delta")
-        Traceloop.init(
-            app_name=os.environ.get("OTEL_SERVICE_NAME"),
-            api_endpoint=os.environ.get("DYNATRACE_EXPORTER_OTLP_ENDPOINT"),
-            headers={"Authorization": "Api-Token " + os.environ.get("DYNATRACE_API_TOKEN", "")},
-            disable_batch=True,
-        )
+    """Set up OpenInference tracing once per Streamlit server process.
+
+    `st.cache_resource` keeps this from running again on every script rerun.
+    """
+    init_observability()
+    return True
 
 _init_instrumentation()
+
+# OpenInference tracer used for the explicit root span around each user query.
+# Everything below it (supervisor, agents, LLM calls, tools) is captured
+# automatically by the LangChain/LangGraph instrumentor.
+tracer = get_tracer()
 
 # Set a default USER_AGENT if not set, to prevent timeout issues when fetching news
 if not os.environ.get("USER_AGENT"):
@@ -295,30 +296,42 @@ class FinancialAgentApp:
         """
         try:
             if st.session_state.agent:
-                streaming_callback, accumulated_text_obj, accumulated_tool_obj = (
-                    self.get_streaming_callback(text_placeholder, tool_placeholder)
-                )
-                try:
-                    response = await asyncio.wait_for(
-                        astream_graph(
-                            st.session_state.agent,
-                            {"messages": [HumanMessage(content=query)]},
-                            callback=streaming_callback,
-                            config=RunnableConfig(
-                                recursion_limit=st.session_state.recursion_limit,
-                                # thread_id=st.session_state.thread_id,
-                                callbacks=[]
-                            ),
-                        ),
-                        timeout=timeout_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    error_msg = f"⏱️ Request time exceeded {timeout_seconds} seconds. Please try again later."
-                    return {"error": error_msg}, error_msg, ""
+                # `using_attributes` stamps session.id (and gen_ai.conversation.id)
+                # onto every span produced while handling this query, so a whole
+                # chat conversation can be followed in Dynatrace AI Observability.
+                with using_attributes(session_id=st.session_state.get("thread_id", "")):
+                    with tracer.start_as_current_span(
+                        "financial_analysis",
+                        openinference_span_kind="chain",
+                    ) as span:
+                        span.set_input(query)
+                        streaming_callback, accumulated_text_obj, accumulated_tool_obj = (
+                            self.get_streaming_callback(text_placeholder, tool_placeholder)
+                        )
+                        try:
+                            response = await asyncio.wait_for(
+                                astream_graph(
+                                    st.session_state.agent,
+                                    {"messages": [HumanMessage(content=query)]},
+                                    callback=streaming_callback,
+                                    config=RunnableConfig(
+                                        recursion_limit=st.session_state.recursion_limit,
+                                        # thread_id=st.session_state.thread_id,
+                                        callbacks=[]
+                                    ),
+                                ),
+                                timeout=timeout_seconds,
+                            )
+                        except asyncio.TimeoutError:
+                            error_msg = f"⏱️ Request time exceeded {timeout_seconds} seconds. Please try again later."
+                            span.set_status(Status(StatusCode.ERROR, "timeout"))
+                            span.set_output(error_msg)
+                            return {"error": error_msg}, error_msg, ""
 
-                final_text = "".join(accumulated_text_obj)
-                final_tool = "".join(accumulated_tool_obj)
-                return response, final_text, final_tool
+                        final_text = "".join(accumulated_text_obj)
+                        final_tool = "".join(accumulated_tool_obj)
+                        span.set_output(final_text)
+                        return response, final_text, final_tool
             else:
                 return (
                     {"error": "🚫 Agent has not been initialized."},

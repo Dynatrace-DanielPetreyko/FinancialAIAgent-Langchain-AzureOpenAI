@@ -5,10 +5,25 @@ from tools.enhanced_fundamental_tool import EnhancedFundamentalTool
 from agents.base_agent import BaseAgent
 from config.settings import APIConfig
 from core.logging_config import setup_logging
-from traceloop.sdk.decorators import agent
+
 logger = setup_logging()
 
-@agent(name="fundamental_agent")
+
+# Note: this class carried a Traceloop `@agent(name="fundamental_agent")`
+# decorator. It is no longer needed. The OpenInference LangChain/LangGraph
+# instrumentor (see core/observability.py) hooks into LangChain's callback
+# system and emits an AGENT span for every agent in the supervisor graph,
+# named after its LangGraph node - including this one. For code paths that
+# are *not* LangChain (plain Python helpers), use the OpenInference
+# decorators instead:
+#
+#     from core.observability import get_tracer
+#     tracer = get_tracer()
+#
+#     @tracer.agent(name="fundamental_agent")
+#     def my_helper(...): ...
+#
+# `tracer.chain`, `tracer.tool` and `tracer.llm` are available the same way.
 class FundamentalAgent(BaseAgent):
     """Agent for fundamental analysis."""
 

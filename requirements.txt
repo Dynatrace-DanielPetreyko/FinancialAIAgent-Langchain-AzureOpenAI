@@ -21,9 +21,16 @@ langchain-tavily
 # Vector storage and embeddings
 faiss-cpu>=1.11.0
 
-# Observability
-traceloop-sdk>=0.40.3
-opentelemetry-instrumentation-httpx
+# Observability - OpenInference + OpenTelemetry (Dynatrace AI Observability)
+# Replaces OpenLLMetry / traceloop-sdk, which Dynatrace deprecates on 2027-01-31.
+# Instruments LangChain *and* LangGraph via LangChain's callback system.
+openinference-instrumentation-langchain>=0.1.86
+# OTel SDK + OTLP/HTTP exporter are NOT pulled in by the instrumentor.
+opentelemetry-sdk>=1.45.0
+opentelemetry-exporter-otlp-proto-http>=1.45.0
+# Outbound HTTP spans for the yfinance / Tavily calls made by the tools.
+# (Previously arrived transitively via traceloop-sdk.)
+opentelemetry-instrumentation-requests
 
 # Development and testing
 pytest>=7.0.0
@@ -39,4 +46,3 @@ typing-extensions>=4.13.2
 requests>=2.31.0
 pandas>=2.0.0
 numpy>=1.24.0
-langfuse
